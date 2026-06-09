@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import android.content.Context
+import android.content.Intent
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
@@ -217,25 +219,36 @@ fun HomeFeedScreen(
 ) {
     val videos by viewModel.videos.collectAsState()
     val currentIndex by viewModel.currentVideoIndex.collectAsState()
-    
+    val isPlaying by viewModel.isVideoPlaying.collectAsState()
+    val progress by viewModel.videoProgress.collectAsState()
+    val context = LocalContext.current
+
     var showCommentSheet by remember { mutableStateOf(false) }
 
     if (videos.isNotEmpty()) {
-        val currentVideo = videos[currentIndex]
+        // Guard against transient out-of-range indices while the list mutates.
+        val safeIndex = currentIndex.coerceIn(0, videos.size - 1)
+        val currentVideo = videos[safeIndex]
 
         Box(
             modifier = modifier
                 .fillMaxSize()
                 .background(Color.Black)
         ) {
-            // Immersive Video Background simulation
+            // Immersive Video Background simulation. Tapping toggles play/pause.
             Image(
                 painter = painterResource(id = R.drawable.main_feed_dancer),
                 contentDescription = "Video dance performance background",
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { viewModel.togglePlayPause() }
+                    .testTag("video_playpause_surface"),
                 contentScale = ContentScale.Crop,
                 // Dye elements differently per item to simulate distinct video colors!
-                colorFilter = when (currentIndex) {
+                colorFilter = when (safeIndex % 4) {
                     1 -> ColorFilter.tint(Color(0xFF32004F), BlendMode.Multiply)
                     2 -> ColorFilter.tint(Color(0xFF4C1800), BlendMode.Multiply)
                     3 -> ColorFilter.tint(Color(0xFF003D3D), BlendMode.Multiply)
@@ -257,6 +270,29 @@ fun HomeFeedScreen(
                         )
                     )
             )
+
+            // Central Play indicator shown while the clip is paused
+            androidx.compose.animation.AnimatedVisibility(
+                visible = !isPlaying,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.align(Alignment.Center)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(84.dp)
+                        .background(Color.Black.copy(alpha = 0.45f), CircleShape)
+                        .testTag("video_paused_indicator"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.PlayArrow,
+                        contentDescription = "Lecture",
+                        tint = Color.White,
+                        modifier = Modifier.size(48.dp)
+                    )
+                }
+            }
 
             // Top Feed Nav Bar: Live indicator Icon, Tabs (Pour toi, Abonnements), Search Icon
             Row(
@@ -468,6 +504,21 @@ fun HomeFeedScreen(
                     onClick = { viewModel.toggleBookmarkVideo(currentVideo.id) }
                 )
 
+                // Share Button (opens the native share sheet with a deep link)
+                IconButtonWithLabel(
+                    icon = Icons.Filled.Share,
+                    tint = Color.White,
+                    label = "Partager",
+                    testTag = "share_click_btn",
+                    onClick = {
+                        shareVideoDeepLink(
+                            context = context,
+                            subject = "AfroVibe • @${currentVideo.creatorUsername}",
+                            message = viewModel.shareMessageForVideo(currentVideo)
+                        )
+                    }
+                )
+
                 // Spinning vinyl record disc with concentric rings and a golden center core
                 val infiniteTransition = rememberInfiniteTransition(label = "vinyl_rotate")
                 val rotation by infiniteTransition.animateFloat(
@@ -604,6 +655,18 @@ fun HomeFeedScreen(
                     )
                 }
             }
+
+            // Playback progress bar pinned just above the bottom navigation
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .testTag("video_progress_bar"),
+                color = AfroPrimaryGold,
+                trackColor = Color.White.copy(alpha = 0.25f)
+            )
 
             // Real-Time Comments Bottom Sheet Overlay
             if (showCommentSheet) {
@@ -828,8 +891,19 @@ fun DiscoverScreen(
     var searchQuery by remember { mutableStateOf("") }
     val selectedFilter by viewModel.discoverFilter.collectAsState()
     val sounds by viewModel.sounds.collectAsState()
+    val videos by viewModel.videos.collectAsState()
 
     val categories = listOf("Tout", "Danse", "Musique", "Défis", "Mode", "Humour")
+
+    // The screen switches into "results" mode as soon as the user types a query
+    // or picks a category other than "Tout".
+    val isSearching = searchQuery.isNotBlank() || selectedFilter != "Tout"
+    val videoResults = remember(searchQuery, selectedFilter, videos) {
+        viewModel.searchVideos(searchQuery, selectedFilter)
+    }
+    val soundResults = remember(searchQuery, sounds) {
+        viewModel.searchSounds(searchQuery)
+    }
 
     LazyColumn(
         modifier = modifier
@@ -850,6 +924,17 @@ fun DiscoverScreen(
                     .padding(top = 12.dp)
                     .testTag("search_input_field"),
                 leadingIcon = { Icon(imageVector = Icons.Filled.Search, contentDescription = null, tint = AfroTextMuted) },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(
+                            onClick = { searchQuery = "" },
+                            modifier = Modifier.testTag("search_clear_btn")
+                        ) {
+                            Icon(imageVector = Icons.Filled.Close, contentDescription = "Effacer", tint = AfroTextMuted)
+                        }
+                    }
+                },
+                singleLine = true,
                 colors = TextFieldDefaults.colors(
                     focusedContainerColor = AfroSurfaceDark,
                     unfocusedContainerColor = AfroSurfaceDark,
@@ -901,7 +986,136 @@ fun DiscoverScreen(
             }
         }
 
+        // Search / category results section (replaces the promo content when active)
+        if (isSearching) {
+            item {
+                Text(
+                    text = if (videoResults.isEmpty() && soundResults.isEmpty())
+                        "Aucun résultat"
+                    else
+                        "${videoResults.size} vidéo(s) trouvée(s)",
+                    color = AfroPrimaryGold,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.testTag("search_results_header")
+                )
+            }
+
+            if (videoResults.isEmpty() && soundResults.isEmpty()) {
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 40.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.SearchOff,
+                            contentDescription = null,
+                            tint = AfroTextMuted,
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Text(
+                            text = "Essaie un autre mot-clé, un créateur ou un #hashtag.",
+                            color = AfroTextMuted,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+
+            if (soundResults.isNotEmpty()) {
+                item {
+                    Text(text = "Sons", color = AfroTextLight, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                }
+                items(soundResults) { sound ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(AfroSurfaceDark)
+                            .border(BorderStroke(1.dp, AfroPurpleBorder), RoundedCornerShape(12.dp))
+                            .clickable { viewModel.navigateTo(Screen.SoundDetail(sound.id)) }
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .background(AfroSecondaryPurple.copy(alpha = 0.25f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(imageVector = Icons.Filled.MusicNote, contentDescription = null, tint = AfroPrimaryGold, modifier = Modifier.size(20.dp))
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = sound.title, color = AfroTextLight, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(text = "${sound.artist} • ${sound.videoCount}", color = AfroTextMuted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Icon(imageVector = Icons.Filled.ChevronRight, contentDescription = null, tint = AfroTextMuted, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+
+            if (videoResults.isNotEmpty()) {
+                item {
+                    Text(text = "Vidéos", color = AfroTextLight, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                }
+                items(videoResults.chunked(3)) { rowVideos ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        rowVideos.forEach { video ->
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .aspectRatio(0.7f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(AfroSurfaceDark)
+                                    .clickable { viewModel.openVideoById(video.id) }
+                                    .testTag("search_result_video")
+                            ) {
+                                Image(
+                                    painter = painterResource(id = R.drawable.main_feed_dancer),
+                                    contentDescription = video.caption,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop,
+                                    colorFilter = ColorFilter.tint(Color(0xFF2E1A3D), BlendMode.Multiply)
+                                )
+                                Column(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomStart)
+                                        .padding(6.dp)
+                                ) {
+                                    Text(
+                                        text = "@${video.creatorUsername}",
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(imageVector = Icons.Filled.Favorite, contentDescription = null, tint = AfroAccentPink, modifier = Modifier.size(11.dp))
+                                        Text(text = " ${formatCount(video.likesCount)}", color = Color.White, fontSize = 10.sp)
+                                    }
+                                }
+                            }
+                        }
+                        // Pad incomplete rows so thumbnails keep their width.
+                        repeat(3 - rowVideos.size) { Spacer(modifier = Modifier.weight(1f)) }
+                    }
+                }
+            }
+
+            item { Spacer(modifier = Modifier.height(100.dp)) }
+        }
+
         // Beautiful Premium Banner "DÉFIE TA CULTURE"
+        if (!isSearching) {
         item {
             Card(
                 modifier = Modifier
@@ -1090,6 +1304,7 @@ fun DiscoverScreen(
                 )
             }
         }
+        } // end if (!isSearching)
     }
 }
 
@@ -1145,6 +1360,7 @@ fun CameraScreen(
     modifier: Modifier = Modifier
 ) {
     val isRecording by viewModel.isRecording.collectAsState()
+    val isRecordingPaused by viewModel.isRecordingPaused.collectAsState()
     val recordProgress by viewModel.recordingProgress.collectAsState()
     val selectedSound by viewModel.selectedSoundToRecord.collectAsState()
     val recordedVideo by viewModel.recordedVideoPath.collectAsState()
@@ -1292,13 +1508,28 @@ fun CameraScreen(
         ) {
             // Video record progress visual counter
             if (isRecording) {
-                Box(
+                Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(12.dp))
                         .background(Color.Black.copy(alpha = 0.7f))
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text(text = recordProgress, color = AfroAccentPink, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .background(
+                                if (isRecordingPaused) AfroTextMuted else Color.Red,
+                                CircleShape
+                            )
+                    )
+                    Text(
+                        text = if (isRecordingPaused) "$recordProgress • EN PAUSE" else recordProgress,
+                        color = AfroAccentPink,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
                 }
             }
 
@@ -1337,20 +1568,46 @@ fun CameraScreen(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Effects drawer icon on left
+                // Left slot: Effects when idle, Pause/Resume toggle while recording
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    IconButton(
-                        onClick = {},
-                        modifier = Modifier
-                            .size(48.dp)
-                            .background(Color.Black.copy(alpha = 0.4f), CircleShape)
-                    ) {
-                        Icon(imageVector = Icons.Filled.Face, contentDescription = "Effets", tint = AfroPrimaryGold, modifier = Modifier.size(24.dp))
+                    if (isRecording) {
+                        IconButton(
+                            onClick = {
+                                if (isRecordingPaused) viewModel.resumeRecording()
+                                else viewModel.pauseRecording()
+                            },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .background(Color.Black.copy(alpha = 0.4f), CircleShape)
+                                .testTag("record_pause_btn")
+                        ) {
+                            Icon(
+                                imageVector = if (isRecordingPaused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
+                                contentDescription = if (isRecordingPaused) "Reprendre" else "Pause",
+                                tint = AfroPrimaryGold,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                        Text(
+                            text = if (isRecordingPaused) "Reprendre" else "Pause",
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    } else {
+                        IconButton(
+                            onClick = {},
+                            modifier = Modifier
+                                .size(48.dp)
+                                .background(Color.Black.copy(alpha = 0.4f), CircleShape)
+                        ) {
+                            Icon(imageVector = Icons.Filled.Face, contentDescription = "Effets", tint = AfroPrimaryGold, modifier = Modifier.size(24.dp))
+                        }
+                        Text("Effets", color = Color.White, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
                     }
-                    Text("Effets", color = Color.White, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
                 }
 
-                // Giant Pulse Red Record button
+                // Giant Pulse Record button (square stop icon while recording)
                 IconButton(
                     onClick = {
                         if (isRecording) {
@@ -1367,14 +1624,23 @@ fun CameraScreen(
                         modifier = Modifier
                             .fillMaxSize()
                             .border(BorderStroke(4.dp, Color.White), CircleShape)
-                            .padding(6.dp)
+                            .padding(6.dp),
+                        contentAlignment = Alignment.Center
                     ) {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .clip(CircleShape)
+                                .clip(if (isRecording) RoundedCornerShape(12.dp) else CircleShape)
                                 .background(if (isRecording) AfroAccentPink else Color.Red)
                         )
+                        if (isRecording) {
+                            Icon(
+                                imageVector = Icons.Filled.Stop,
+                                contentDescription = "Arrêter",
+                                tint = Color.White,
+                                modifier = Modifier.size(30.dp)
+                            )
+                        }
                     }
                 }
 
@@ -1534,6 +1800,7 @@ fun InboxScreen(
     modifier: Modifier = Modifier
 ) {
     val notifications by viewModel.notifications.collectAsState()
+    val unreadCount by viewModel.unreadNotificationsCount.collectAsState()
     val selectedChatSender by viewModel.selectedChatSender.collectAsState()
     val chatMessages by viewModel.chatMessages.collectAsState()
 
@@ -1558,14 +1825,34 @@ fun InboxScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Boîte de réception",
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = AfroTextLight
-                )
-                IconButton(onClick = {}) {
-                    Icon(imageVector = Icons.Filled.Edit, contentDescription = "Nouveau Message", tint = AfroPrimaryGold)
+                Column {
+                    Text(
+                        text = "Boîte de réception",
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = AfroTextLight
+                    )
+                    if (unreadCount > 0) {
+                        Text(
+                            text = "$unreadCount non lue(s)",
+                            fontSize = 12.sp,
+                            color = AfroAccentPink,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (unreadCount > 0) {
+                        TextButton(
+                            onClick = { viewModel.markAllNotificationsRead() },
+                            modifier = Modifier.testTag("mark_all_read_btn")
+                        ) {
+                            Text(text = "Tout lire", color = AfroPrimaryGold, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    IconButton(onClick = {}) {
+                        Icon(imageVector = Icons.Filled.Edit, contentDescription = "Nouveau Message", tint = AfroPrimaryGold)
+                    }
                 }
             }
 
@@ -1639,11 +1926,7 @@ fun InboxScreen(
                 items(notifications) { item ->
                     NotificationRowItem(
                         notification = item,
-                        onClick = {
-                            if (item.type == NotificationType.MESSAGE) {
-                                viewModel.selectChatSender(item.senderName)
-                            }
-                        }
+                        onClick = { viewModel.onNotificationClicked(item) }
                     )
                 }
             }
@@ -1800,12 +2083,16 @@ fun NotificationRowItem(
         else -> Color(0xFF00FFCC)
     }
 
+    // Unread notifications get a subtle gold tint and a highlighted border.
+    val rowBackground = if (notification.isRead) AfroSurfaceDark else AfroPrimaryGold.copy(alpha = 0.08f)
+    val rowBorder = if (notification.isRead) AfroPurpleBorder else AfroPrimaryGold.copy(alpha = 0.5f)
+
     Row(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(AfroSurfaceDark)
-            .border(BorderStroke(0.5.dp, AfroPurpleBorder), RoundedCornerShape(12.dp))
+            .background(rowBackground)
+            .border(BorderStroke(if (notification.isRead) 0.5.dp else 1.dp, rowBorder), RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
             .padding(12.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -1852,6 +2139,13 @@ fun NotificationRowItem(
             IconButton(onClick = onClick) {
                 Icon(imageVector = Icons.Filled.Chat, contentDescription = "Chat", tint = AfroPrimaryGold, modifier = Modifier.size(18.dp))
             }
+        } else if (!notification.isRead) {
+            // Unread dot indicator
+            Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .background(AfroAccentPink, CircleShape)
+            )
         }
     }
 }
@@ -2631,6 +2925,22 @@ fun SettingsOptionRow(
     }
 }
 
+
+/**
+ * Opens the Android share sheet so the active video can be shared with a deep link.
+ * The link points at the https/afrovibe scheme handled by MainActivity's intent-filters.
+ */
+fun shareVideoDeepLink(context: Context, subject: String, message: String) {
+    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_SUBJECT, subject)
+        putExtra(Intent.EXTRA_TEXT, message)
+    }
+    val chooser = Intent.createChooser(sendIntent, "Partager cette vibe via").apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    context.startActivity(chooser)
+}
 
 // Helper for numbers format (e.g. 12500 -> "12.5K")
 fun formatCount(count: Int): String {

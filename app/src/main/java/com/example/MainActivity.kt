@@ -1,9 +1,12 @@
 package com.example
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.compose.animation.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -33,14 +36,19 @@ import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.viewmodel.AfroVibeViewModel
 
 class MainActivity : ComponentActivity() {
+
+    // Hoisted to the Activity so incoming share deep links (onNewIntent) can reach it.
+    private val viewModel: AfroVibeViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Handle the deep link that cold-started the app (if any).
+        handleDeepLink(intent)
         setContent {
             MyApplicationTheme {
-                // Initialize our robust data model and view state controller
-                val viewModel = remember { AfroVibeViewModel() }
                 val currentScreen by viewModel.currentScreen.collectAsState()
+                val unreadCount by viewModel.unreadNotificationsCount.collectAsState()
 
                 // Check if the current screen is one of our primary tab screens
                 val isTabScreen = remember(currentScreen) {
@@ -58,6 +66,7 @@ class MainActivity : ComponentActivity() {
                         if (isTabScreen) {
                             AfroBottomNavigationBar(
                                 currentScreen = currentScreen,
+                                unreadCount = unreadCount,
                                 onTabSelected = { selectedScreen ->
                                     viewModel.navigateTo(selectedScreen)
                                 }
@@ -86,6 +95,31 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleDeepLink(intent)
+    }
+
+    /**
+     * Resolves an incoming share/deep link and opens the matching video.
+     * Supported forms:
+     *   - afrovibe://video/{id}
+     *   - https://afrovibe.app/video/{id}
+     */
+    private fun handleDeepLink(intent: Intent?) {
+        val data: Uri = intent?.data ?: return
+        val segments = data.pathSegments
+        val videoId = when {
+            data.host == "video" -> segments.firstOrNull()
+            segments.size >= 2 && segments[segments.size - 2] == "video" -> segments.last()
+            else -> null
+        }
+        if (!videoId.isNullOrBlank()) {
+            viewModel.openVideoById(videoId)
         }
     }
 
@@ -173,7 +207,8 @@ class MainActivity : ComponentActivity() {
 fun AfroBottomNavigationBar(
     currentScreen: Screen,
     onTabSelected: (Screen) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    unreadCount: Int = 0
 ) {
     Surface(
         color = Color(0xFF000000),
@@ -262,6 +297,7 @@ fun AfroBottomNavigationBar(
                 inactiveIcon = Icons.Outlined.Mail,
                 label = "Boîte",
                 testTag = "tab_boite_btn",
+                badgeCount = unreadCount,
                 onClick = { onTabSelected(Screen.Inbox) }
             )
 
@@ -285,7 +321,8 @@ fun AfroNavBarItem(
     inactiveIcon: ImageVector,
     label: String,
     testTag: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    badgeCount: Int = 0
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -295,6 +332,19 @@ fun AfroNavBarItem(
             .clickable(onClick = onClick)
             .padding(vertical = 2.dp, horizontal = 8.dp)
     ) {
+        BadgedBox(
+            badge = {
+                if (badgeCount > 0) {
+                    Badge(
+                        containerColor = Color(0xFFFF4B4B),
+                        contentColor = Color.White,
+                        modifier = Modifier.testTag("inbox_unread_badge")
+                    ) {
+                        Text(text = if (badgeCount > 9) "9+" else badgeCount.toString(), fontSize = 9.sp)
+                    }
+                }
+            }
+        ) {
         if (isActive) {
             Box(
                 modifier = Modifier
@@ -322,6 +372,7 @@ fun AfroNavBarItem(
                     modifier = Modifier.size(22.dp)
                 )
             }
+        }
         }
         Text(
             text = label,
