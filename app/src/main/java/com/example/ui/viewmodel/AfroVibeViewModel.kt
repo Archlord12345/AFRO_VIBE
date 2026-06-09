@@ -6,12 +6,22 @@ import com.example.data.*
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 class AfroVibeViewModel : ViewModel() {
+
+    companion object {
+        // Simulated duration of a single feed video clip.
+        private const val VIDEO_DURATION_MS = 8000L
+        private const val PLAYBACK_TICK_MS = 50L
+        private const val MAX_RECORDING_SECONDS = 15
+    }
 
     // Current global screen state
     private val _currentScreen = MutableStateFlow<Screen>(Screen.Welcome)
@@ -32,6 +42,14 @@ class AfroVibeViewModel : ViewModel() {
     private val _currentVideoIndex = MutableStateFlow(0)
     val currentVideoIndex: StateFlow<Int> = _currentVideoIndex.asStateFlow()
 
+    // Whether the active feed video is currently playing (false = paused).
+    private val _isVideoPlaying = MutableStateFlow(true)
+    val isVideoPlaying: StateFlow<Boolean> = _isVideoPlaying.asStateFlow()
+
+    // Playback progress of the active video in the range 0f..1f.
+    private val _videoProgress = MutableStateFlow(0f)
+    val videoProgress: StateFlow<Float> = _videoProgress.asStateFlow()
+
     // Sounds list
     private val _sounds = MutableStateFlow<List<AfroSound>>(emptyList())
     val sounds: StateFlow<List<AfroSound>> = _sounds.asStateFlow()
@@ -39,6 +57,11 @@ class AfroVibeViewModel : ViewModel() {
     // Notifications and Stories list
     private val _notifications = MutableStateFlow<List<AfroNotification>>(emptyList())
     val notifications: StateFlow<List<AfroNotification>> = _notifications.asStateFlow()
+
+    // Count of unread notifications, used for the Inbox tab badge.
+    val unreadNotificationsCount: StateFlow<Int> = _notifications
+        .map { list -> list.count { !it.isRead } }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
 
     // Simulated Chat state inside inbox
     private val _selectedChatSender = MutableStateFlow<String?>(null)
@@ -50,6 +73,10 @@ class AfroVibeViewModel : ViewModel() {
     // Camera states
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
+
+    // Whether an in-progress recording is paused (recording can be resumed).
+    private val _isRecordingPaused = MutableStateFlow(false)
+    val isRecordingPaused: StateFlow<Boolean> = _isRecordingPaused.asStateFlow()
 
     private val _recordingProgress = MutableStateFlow("0s")
     val recordingProgress: StateFlow<String> = _recordingProgress.asStateFlow()
@@ -89,10 +116,42 @@ class AfroVibeViewModel : ViewModel() {
 
     private var liveStreamJob: Job? = null
     private var recordJob: Job? = null
+    private var playbackJob: Job? = null
     private var nextHeartId = 0
+    private var recordedSeconds = 0
 
     init {
         loadMockData()
+        startPlaybackLoop()
+    }
+
+    /**
+     * Drives the simulated playback progress of the active feed video. The clip
+     * only advances while the user is on the HomeFeed and playback is not paused,
+     * which is what makes the tap-to-pause gesture meaningful. When a clip ends it
+     * automatically advances to the next video, looping back to the start.
+     */
+    private fun startPlaybackLoop() {
+        playbackJob?.cancel()
+        playbackJob = viewModelScope.launch {
+            while (true) {
+                delay(PLAYBACK_TICK_MS)
+                val canPlay = _currentScreen.value is Screen.HomeFeed &&
+                    _isVideoPlaying.value &&
+                    _videos.value.isNotEmpty()
+                if (!canPlay) continue
+
+                val step = PLAYBACK_TICK_MS.toFloat() / VIDEO_DURATION_MS.toFloat()
+                val next = _videoProgress.value + step
+                if (next >= 1f) {
+                    val size = _videos.value.size
+                    _currentVideoIndex.value = (_currentVideoIndex.value + 1) % size
+                    _videoProgress.value = 0f
+                } else {
+                    _videoProgress.value = next
+                }
+            }
+        }
     }
 
     private fun loadMockData() {
@@ -185,11 +244,11 @@ class AfroVibeViewModel : ViewModel() {
 
         // Mock notifications and stories
         _notifications.value = listOf(
-            AfroNotification("nt_1", NotificationType.LIKE, "Queen_Lafo", 2, "a aimé votre vidéo.", "2m", isStory = true),
+            AfroNotification("nt_1", NotificationType.LIKE, "Queen_Lafo", 2, "a aimé votre vidéo.", "2m", isStory = true, relatedVideoId = "vid_1"),
             AfroNotification("nt_2", NotificationType.MESSAGE, "Mister_K", 3, "Wesh ça vibe fort ! 🔥", "5m", isStory = true),
             AfroNotification("nt_3", NotificationType.SYSTEM, "AfroBeats_Off", 4, "Nouveau son dispo !", "15m", isStory = true),
-            AfroNotification("nt_4", NotificationType.CHALLENGE, "Afro Move Challenge", 1, "Votre vidéo est dans le top 3 !", "1h"),
-            AfroNotification("nt_5", NotificationType.SYSTEM, "Équipe AfroVibe", 1, "Bienvenue dans la communauté ! Faisons briller la culture locale 👋🏽🦁", "1j")
+            AfroNotification("nt_4", NotificationType.CHALLENGE, "Afro Move Challenge", 1, "Votre vidéo est dans le top 3 !", "1h", relatedVideoId = "vid_3"),
+            AfroNotification("nt_5", NotificationType.SYSTEM, "Équipe AfroVibe", 1, "Bienvenue dans la communauté ! Faisons briller la culture locale 👋🏽🦁", "1j", isRead = true)
         )
 
         // Initialize Chat messages
@@ -235,11 +294,90 @@ class AfroVibeViewModel : ViewModel() {
         _discoverFilter.value = category
     }
 
+    /** Maps a Discover category chip to the keywords used to match content. */
+    private fun keywordsForCategory(category: String): List<String> = when (category) {
+        "Danse" -> listOf("danse", "dance", "mapouka", "afrodance", "kuduro")
+        "Musique" -> listOf("musique", "amapiano", "son", "beat", "groove", "bass", "drums")
+        "Défis" -> listOf("défi", "defi", "challenge", "fastfeet")
+        "Mode" -> listOf("mode", "model", "style", "fashion")
+        "Humour" -> listOf("humour", "fun", "😂", "drôle", "drole")
+        else -> emptyList()
+    }
+
+    private fun VideoItem.matchesCategory(category: String): Boolean {
+        if (category == "Tout") return true
+        val keywords = keywordsForCategory(category)
+        if (keywords.isEmpty()) return true
+        val haystack = (caption + " " + tags.joinToString(" ") + " " + soundName).lowercase()
+        return keywords.any { haystack.contains(it) }
+    }
+
+    private fun VideoItem.matchesQuery(query: String): Boolean {
+        val q = query.trim().lowercase()
+        if (q.isEmpty()) return true
+        return creatorName.lowercase().contains(q) ||
+            creatorUsername.lowercase().contains(q) ||
+            caption.lowercase().contains(q) ||
+            soundName.lowercase().contains(q) ||
+            tags.any { it.lowercase().contains(q) }
+    }
+
+    /** Filters the feed by the active category chip and a free-text query. */
+    fun searchVideos(query: String, category: String = _discoverFilter.value): List<VideoItem> {
+        return _videos.value.filter { it.matchesCategory(category) && it.matchesQuery(query) }
+    }
+
+    /** Filters the sound library by a free-text query (title or artist). */
+    fun searchSounds(query: String): List<AfroSound> {
+        val q = query.trim().lowercase()
+        if (q.isEmpty()) return emptyList()
+        return _sounds.value.filter {
+            it.title.lowercase().contains(q) || it.artist.lowercase().contains(q)
+        }
+    }
+
     // Video Feed Actions
     fun setCurrentVideoIndex(index: Int) {
         if (index in 0 until _videos.value.size) {
             _currentVideoIndex.value = index
+            // Restart playback from the beginning whenever the active clip changes.
+            _videoProgress.value = 0f
+            _isVideoPlaying.value = true
         }
+    }
+
+    /** Toggles play/pause for the active feed video. */
+    fun togglePlayPause() {
+        _isVideoPlaying.update { !it }
+    }
+
+    fun setVideoPlaying(playing: Boolean) {
+        _isVideoPlaying.value = playing
+    }
+
+    /**
+     * Opens a specific video in the feed by its id (used by the profile grid,
+     * notifications and incoming share deep links) and resumes playback.
+     */
+    fun openVideoById(videoId: String) {
+        val index = _videos.value.indexOfFirst { it.id == videoId }
+        if (index >= 0) {
+            setCurrentVideoIndex(index)
+        }
+        navigateTo(Screen.HomeFeed)
+    }
+
+    /**
+     * Builds the shareable deep link for a video. Matches the intent-filters
+     * declared in the manifest so the link reopens the app on the right clip.
+     */
+    fun shareLinkForVideo(video: VideoItem): String {
+        return "https://afrovibe.app/video/${video.id}"
+    }
+
+    fun shareMessageForVideo(video: VideoItem): String {
+        return "Regarde la vibe de @${video.creatorUsername} sur AfroVibe ! 🔥🌍\n" +
+            "${video.caption}\n\n${shareLinkForVideo(video)}"
     }
 
     fun toggleLikeVideo(videoId: String) {
@@ -292,13 +430,18 @@ class AfroVibeViewModel : ViewModel() {
     fun startRecordingSimulation() {
         if (_isRecording.value) return
         _isRecording.value = true
-        _recordingProgress.value = "0s / 10s"
-        
+        _isRecordingPaused.value = false
+        recordedSeconds = 0
+        _recordingProgress.value = "0s / ${MAX_RECORDING_SECONDS}s"
+
         recordJob = viewModelScope.launch {
-            for (i in 1..10) {
+            while (recordedSeconds < MAX_RECORDING_SECONDS) {
                 delay(1000)
                 if (!_isRecording.value) break
-                _recordingProgress.value = "${i}s / 10s"
+                // Honour pause: do not increment the timer while paused.
+                if (_isRecordingPaused.value) continue
+                recordedSeconds += 1
+                _recordingProgress.value = "${recordedSeconds}s / ${MAX_RECORDING_SECONDS}s"
             }
             if (_isRecording.value) {
                 stopAndSaveRecording()
@@ -306,31 +449,51 @@ class AfroVibeViewModel : ViewModel() {
         }
     }
 
+    /** Pauses an in-progress recording without discarding the captured footage. */
+    fun pauseRecording() {
+        if (_isRecording.value) _isRecordingPaused.value = true
+    }
+
+    /** Resumes a paused recording. */
+    fun resumeRecording() {
+        if (_isRecording.value) _isRecordingPaused.value = false
+    }
+
     fun stopAndSaveRecording() {
         _isRecording.value = false
+        _isRecordingPaused.value = false
         recordJob?.cancel()
         _recordedVideoPath.value = "mock_video_recorded_vibe_clip.mp4"
     }
 
     fun cancelRecording() {
         _isRecording.value = false
+        _isRecordingPaused.value = false
         recordJob?.cancel()
+        recordedSeconds = 0
         _recordingProgress.value = "0s"
         _recordedVideoPath.value = null
+    }
+
+    /** Extracts #hashtags typed in the caption, falling back to default tags. */
+    private fun parseTags(caption: String): List<String> {
+        val parsed = Regex("#[\\p{L}0-9_]+").findAll(caption).map { it.value }.distinct().toList()
+        return if (parsed.isEmpty()) listOf("#AfroVibe", "#MonStyle", "#DanseTaCulture") else parsed
     }
 
     fun publishRecordedVideo(caption: String) {
         val sound = _selectedSoundToRecord.value
         val soundTitle = sound?.title ?: "Afro Vibe Original"
         val soundArtistName = sound?.artist ?: "Mister Vibe"
+        val trimmedCaption = caption.trim()
 
         val newVideo = VideoItem(
             id = "vid_usr_${System.currentTimeMillis()}",
             creatorName = "Mister Vibe",
             creatorUsername = "King_Moves",
             creatorAvatarUrl = 0, // Me
-            caption = if (caption.trim().isEmpty()) "Ma nouvelle vibe culturelle ! 🌍🔥" else caption,
-            tags = listOf("#AfroVibe", "#MonStyle", "#DanseTaCulture"),
+            caption = if (trimmedCaption.isEmpty()) "Ma nouvelle vibe culturelle ! 🌍🔥" else trimmedCaption,
+            tags = parseTags(trimmedCaption),
             soundName = "$soundTitle - $soundArtistName",
             soundArtist = soundArtistName,
             likesCount = 1,
@@ -349,11 +512,36 @@ class AfroVibeViewModel : ViewModel() {
             user.copy(videos = listOf(newVideo) + user.videos)
         }
 
-        // Return to HomeFeed and reset index
+        // Return to HomeFeed and play the freshly published clip from the start.
         _currentVideoIndex.value = 0
+        _videoProgress.value = 0f
+        _isVideoPlaying.value = true
         _currentScreen.value = Screen.HomeFeed
         _recordedVideoPath.value = null
         _selectedSoundToRecord.value = null
+    }
+
+    // Notification Actions
+    fun markNotificationRead(id: String) {
+        _notifications.update { list ->
+            list.map { if (it.id == id) it.copy(isRead = true) else it }
+        }
+    }
+
+    fun markAllNotificationsRead() {
+        _notifications.update { list -> list.map { it.copy(isRead = true) } }
+    }
+
+    /**
+     * Handles a tap on a notification: marks it read, opens chat for messages and
+     * jumps to the related video for like/comment/challenge activity.
+     */
+    fun onNotificationClicked(notification: AfroNotification) {
+        markNotificationRead(notification.id)
+        when (notification.type) {
+            NotificationType.MESSAGE -> selectChatSender(notification.senderName)
+            else -> notification.relatedVideoId?.let { openVideoById(it) }
+        }
     }
 
     // Chat Actions

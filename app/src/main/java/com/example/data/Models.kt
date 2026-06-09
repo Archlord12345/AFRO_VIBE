@@ -53,7 +53,9 @@ data class AfroNotification(
     val senderAvatarUrl: Int,
     val detailText: String,
     val timeAgo: String,
-    val isStory: Boolean = false
+    val isStory: Boolean = false,
+    val isRead: Boolean = false,
+    val relatedVideoId: String? = null
 )
 
 enum class NotificationType {
